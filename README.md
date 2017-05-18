@@ -8,6 +8,11 @@ The perplexity on the holdout set after 5 epochs is about 48.7 (vs 47.5 in the p
 It takes about 16 hours to reach these results on 8 Titan Xs. DGX-1 is about 30% faster on the baseline model.
 
 
+# lm_server_v.py  client.py
+The code implements thriftpy interface for lm model so that people can call this Conveniently
+
+
+
 ## Dependencies
 * Anaconda
 * TensorFlow 0.10
