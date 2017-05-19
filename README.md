@@ -15,7 +15,7 @@ The code implements thriftpy interface for lm model so that people can call this
 
 ## Dependencies
 * Anaconda
-* TensorFlow 0.10
+* TensorFlow 1.01
 * Python 3.5 (should work with 2.7 but haven't tested it recently)
 * 1B Word Benchmark Dataset (https://github.com/ciprian-chelba/1-billion-word-language-modeling-benchmark to get data)
 * tmux (the start script opens up a tmux session with multiple windows)
