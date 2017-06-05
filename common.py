@@ -21,13 +21,9 @@ def find_trainable_variables(key):
 def load_from_checkpoint(saver, logdir):
     sess = tf.get_default_session()
     ckpt = tf.train.get_checkpoint_state(logdir)
+    print("model_checkpoint_path", ckpt.model_checkpoint_path) 
     if ckpt and ckpt.model_checkpoint_path:
-        if os.path.isabs(ckpt.model_checkpoint_path):
-            # Restores from checkpoint with absolute path.
-            saver.restore(sess, ckpt.model_checkpoint_path)
-        else:
-            # Restores from checkpoint with relative path.
-            saver.restore(sess, os.path.join(logdir, ckpt.model_checkpoint_path))
+        saver.restore(sess, ckpt.model_checkpoint_path)
         return True
     return False
 
@@ -46,16 +42,14 @@ class CheckpointLoader(object):
                 global_step = int(self.global_step_tensor.eval())
                 if global_step <= self.last_global_step:
                     print("Waiting for a new checkpoint...")
-                    time.sleep(60)
+                    #time.sleep(60)
                     continue
                 print("Succesfully loaded model at step=%s." % global_step)
             else:
                 print("No checkpoint file found. Waiting...")
-                time.sleep(60)
                 continue
             self.last_global_step = global_step
             return True
-
 
 def average_grads(tower_grads):
     def average_dense(grad_and_vars):
@@ -76,8 +70,8 @@ def average_grads(tower_grads):
         for g, _ in grad_and_vars:
             indices += [g.indices]
             values += [g.values]
-        indices = tf.concat(0, indices)
-        values = tf.concat(0, values)
+        indices = tf.concat(indices,0)
+        values = tf.concat(values,0)
         return tf.IndexedSlices(values, indices, grad_and_vars[0][0].dense_shape)
 
     average_grads = []

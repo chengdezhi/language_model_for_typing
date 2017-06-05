@@ -53,12 +53,16 @@ class Vocabulary(object):
         return self._id_to_token[id_]
 
     @staticmethod
-    def from_file(filename):
+    def from_file(filename,vocab_size =793470):
         vocab = Vocabulary()
         with codecs.open(filename, "r", "utf-8") as f:
+            cnt = 0
             for line in f:
                 word, count = line.strip().split()
                 vocab.add(word, int(count))
+                cnt += 1
+                if cnt >= vocab_size:
+                    break
         vocab.finalize()
         return vocab
 
@@ -78,6 +82,8 @@ class Dataset(object):
         print("Processing file: %s" % file_name)
         with codecs.open(file_name, "r", "utf-8") as f:
             lines = [line.strip() for line in f]
+            print "file_name:",file_name
+            print "lines:",len(lines)
             if not self._deterministic:
                 random.shuffle(lines)
             print("Finished processing!")
@@ -105,6 +111,7 @@ class Dataset(object):
                         if streams[i] is None or len(streams[i]) <= 1:
                             streams[i] = next(sentences)
                         num_tokens = min(len(streams[i]) - 1, num_steps - tokens_filled)
+                        #print "streams:", streams[i]
                         x[i, tokens_filled:tokens_filled+num_tokens] = streams[i][:num_tokens]
                         y[i, tokens_filled:tokens_filled + num_tokens] = streams[i][1:num_tokens+1]
                         w[i, tokens_filled:tokens_filled + num_tokens] = 1

@@ -20,6 +20,8 @@ pattern = re.compile('[\w+]')
 p_punc  = re.compile('(\.|\"|,|\?|\!)')
 hps = LM.get_default_hparams()
 vocab = Vocabulary.from_file("1b_word_vocab.txt")
+st  =  hps.num_steps
+
 
 with tf.variable_scope("model"):                                                        
     hps.vocab_size = 793470
@@ -62,27 +64,28 @@ class PredictHandler(object):
             input_words = sWord.decode("utf-8")
             if input_words.find('<S>')!=0:
                 input_words = '<S> ' + input_words
-
-
             isCompletion = False
             if input_words[-1] == ' ':
-                #print "Predict:"
-                prefix_input = [vocab.get_id(w) for w in input_words.split()[:20]]
+                print "Predict:"
+                prefix_input = [vocab.get_id(w) for w in input_words.split()]
             else:
-                #print "Compeletion:"
+                print "Compeletion:"
                 isCompletion = True
-                prefix_input = [vocab.get_id(w) for w in input_words.split()[:-1][:20]]
+                prefix_input = [vocab.get_id(w) for w in input_words.split()[:-1]]
                 prefix = input_words.split()[-1]
-                #print "prefix:",prefix,type(prefix)
+                print "prefix:",prefix,type(prefix)
             print("input:",sWord,"pre:",prefix_input,"len:",len(prefix_input))
+            input_len = len(prefix_input)
             w = np.zeros([1, len(prefix_input)], np.uint8)
-            w[:] =1 
-            inputs = np.zeros([hps.batch_size*hps.num_gpus,hps.num_steps])
-            weights = np.zeros([hps.batch_size*hps.num_gpus,hps.num_steps])
+            w[:] =1
+            inputs_v = np.zeros([hps.batch_size*hps.num_gpus, hps.num_steps])
+            weights_v = np.zeros([hps.batch_size*hps.num_gpus, hps.num_steps])
+            
+            inputs = np.zeros([hps.batch_size*hps.num_gpus, input_len])
+            weights = np.zeros([hps.batch_size*hps.num_gpus, input_len])
             inputs[0,:len(prefix_input)] = prefix_input[:]
             weights[0,:len(prefix_input)] = w[:]
-
-
+            print "input_len:", input_len
             with sess.as_default():
                 #ckpt_loader.load_checkpoint()  #  FOR ONLY ONE CHECKPOINT 
                 #sess.run(tf.local_variables_initializer())
@@ -90,12 +93,22 @@ class PredictHandler(object):
                 #sess.run(tf.local_variables_initializer())
                 words = []
                 w_prob = []
+                sess.run(init)
+                step = 0
+                while step + st < input_len:
+                    inputs_v[0,:]  =  inputs[0,step:step+st]
+                    weights_v[0,:] =  weights[0,step:step+st] 
+                    index = sess.run([model.index],{model.x:inputs_v, model.w:weights_v})
+                    step += st
+                #print type(state),state[-1][-1][-1][-1]
+                
+                inputs_v[0,:input_len-step] = inputs[0, step:input_len]
+                weights_v[0,:input_len-step] = weights[0,step:input_len]
                 if not isCompletion:
-                    #sess.run(init)
-                    _, indexes = sess.run([init, model.index],{model.x:inputs, model.w:weights})
+                    indexes = sess.run([model.index],{model.x:inputs_v, model.w:weights_v})
                     indexes = np.reshape(indexes,[hps.num_steps,hps.arg_max])
                     for j in range(hps.arg_max):
-                        word = vocab.get_token(indexes[len(prefix_input)-1][j])
+                        word = vocab.get_token(indexes[len(prefix_input)-1-step][j])
                         if not p_punc.match(word)==None:
                             words += [word]
                             continue
@@ -103,9 +116,9 @@ class PredictHandler(object):
                             continue
                         words += [word]
                 else:   
-                    _, prob = sess.run([init, model.logits],{model.x:inputs, model.w:weights})
+                    prob = sess.run([model.logits],{model.x:inputs_v, model.w:weights_v})
                     prob = np.reshape(prob,[hps.num_steps,hps.vocab_size])
-                    prob = prob[len(prefix_input)-1]   # the last prefix_input step prob is the predict one 
+                    prob = prob[len(prefix_input)-1-step]   # the last prefix_input step prob is the predict one 
                     #print "prob:", len(prob)
                     #print "prefix:",trie.keys(prefix)
                     cand = [trie[cand_index] for cand_index in trie.keys(prefix)] 
@@ -122,10 +135,6 @@ class PredictHandler(object):
                         word = vocab.get_token(cand[j])
                         words += [word]
                         w_prob += [cand_prob[j]]
-            
-            
-            
-            
             #print words
             print words[:top_k],w_prob[:top_k]
             #TODO: ADD LSTM PREDICT
@@ -155,12 +164,13 @@ def main():
 
 
 if __name__ == '__main__':
-    #main()
+    main()
     lstm = PredictHandler()
-    res = lstm.getPrediction("Having a little flexibility on that issue would go a long way to putting together a final package once upon a time","","")
+    res = lstm.getPrediction("long before the advent of e-commerce Wal-Mart's founder Sam Walton set out his vision for a successful retail operation We let folks know we're interested in them and that they're vital to us-- cause they are he said","","")
+    res = lstm.getPrediction("Having a little flexibility on that issue would go a long way to putting together a final  once upon a  ","","")
     print res 
     #init = tf.local_variables_initializer()
-    res = lstm.getPrediction("? how are you ","","")
+    res = lstm.getPrediction("once upon a  ","","")
     print res 
     res = lstm.getPrediction("as ? soon as p","","")
     res = lstm.getPrediction("as ? soon as p","","")

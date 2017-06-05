@@ -1,5 +1,4 @@
 class HParams(object):
-
     def __init__(self, **kwargs):
         self._items = {}
         for k, v in kwargs.items():
@@ -28,3 +27,11 @@ class HParams(object):
             else:
                 hps._set(key, value)
         return hps
+
+
+if __name__ == '__main__':
+    b = {}
+    b['a']=1
+    a = 'a'
+    hps = HParams(**b)  #right!
+    print hps.a
