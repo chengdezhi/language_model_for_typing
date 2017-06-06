@@ -17,7 +17,11 @@ class LM(object):
         tower_grads = []
         logitses = []
         indexes = []
-        xs = tf.split(self.x, hps.num_gpus,0)
+        if mode == "predict_next":
+            self.ind = tf.placeholder(tf.int32,name="ind")
+            self.ind_len = tf.placeholder(tf.int32,name="ind_len")
+
+        xs = tf.split(self.x, hps.num_gpus, 0)
         ys = tf.split(self.y, hps.num_gpus, 0)
         ws = tf.split(self.w, hps.num_gpus, 0)
         print ("ngpus:",hps.num_gpus)
@@ -36,9 +40,18 @@ class LM(object):
                 if mode == "train":
                     cur_grads = self._backward(loss, summaries=(i == hps.num_gpus - 1))
                     tower_grads += [cur_grads]
-        if mode == "predict_next":
+        if mode == "predict_next":   # ngpus = 1, nlayers = 1, nums_step =1
             self.logits = logitses
-            self.index = indexes 
+            self.index = indexes
+            ind_logits =  tf.reshape(logitses[0], [hps.vocab_size, -1])
+            ind_logits =  tf.gather(ind_logits, self.ind)
+            print  "ind_logits:", logitses, ind_logits
+            ind_logits =  tf.reshape(ind_logits, [-1, self.ind_len])
+            self.top_k = tf.minimum(self.ind_len, hps.arg_max) 
+            _, self.ind_index    =  tf.nn.top_k(ind_logits, self.top_k)
+            print  "ind_index:",  self.ind_index
+
+
         self.loss = tf.add_n(losses) / len(losses)  # total loss 
         tf.summary.scalar("model/loss", self.loss)
 
@@ -70,7 +83,8 @@ class LM(object):
             with tf.device("/gpu:%d" % gpu):
                 v = tf.Variable(tf.zeros([hps.batch_size, hps.state_size + hps.projected_size]), trainable=False,
                                 collections=[tf.GraphKeys.LOCAL_VARIABLES], name="state_%d_%d" % (gpu, i))
-                self.initial_states += [v]
+                #self.initial_states += [v]
+                self.initial_states = v   # for layers = 1
 
         emb_vars = sharded_variable("emb", [hps.vocab_size, hps.emb_size], hps.num_shards)  #vocab_size is too big for this model
         x = tf.nn.embedding_lookup(emb_vars, x)  # [batch_size, steps, emb_size]
@@ -84,15 +98,16 @@ class LM(object):
             with tf.variable_scope("lstm_%d" % i):
                 cell = LSTMCell(hps.state_size, hps.emb_size, num_proj=hps.projected_size)
 
-            state = self.initial_states[i]
+            state = self.initial_states
             for t in range(hps.num_steps):  # step 
-                inputs[t], state = cell(inputs[t], state)  #inputs[t] is h{t}
+                inputs[t], state = cell(inputs[t], state)  #inputs[t] is h{t}??  state is h(t) ?? result of inputs[t] is project ??
                 if hps.keep_prob < 1.0:
                     inputs[t] = tf.nn.dropout(inputs[t], hps.keep_prob)
 
-            with tf.control_dependencies([self.initial_states[i].assign(state)]):
-                inputs[t] = tf.identity(inputs[t])
-        
+            #with tf.control_dependencies([self.initial_states.assign(state)]):   # for bi-lstm? or two layer lstm 
+            #    inputs[t] = tf.identity(inputs[t])
+       
+        self.final_state = state
         # [batch_size*steps,projected_size]
         inputs = tf.reshape(tf.concat(inputs,1), [-1, hps.projected_size])
 
@@ -108,7 +123,7 @@ class LM(object):
             logits = tf.matmul(inputs, full_softmax_w, transpose_b=True) + softmax_b
             print("train log logits:", logits)
             # targets = tf.reshape(tf.transpose(self.y), [-1])
-            #index = tf.argmax(logits,axis=1)
+            # index = tf.argmax(logits,axis=1)
             
             _, index = tf.nn.top_k(logits, hps.arg_max)
             print "index:",index 
@@ -171,7 +186,7 @@ class LM(object):
     def get_default_hparams():
         return HParams(
             batch_size= 1,  # 256 
-            num_steps = 20,  # 20
+            num_steps = 1,  # 20
             num_shards= 8,
             num_layers=1,
             learning_rate=0.2,
