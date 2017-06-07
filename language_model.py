@@ -5,6 +5,62 @@ from model_utils import sharded_variable, LSTMCell
 from common import assign_to_gpu, average_grads, find_trainable_variables
 from hparams import HParams
 
+class inference_graph(object):
+    def __init__(self, hps):
+        self.x  =  tf.placeholder(tf.int32,[1])
+        self.ind = tf.placeholder(tf.int32, name="ind")
+        # self.ind_len = tf.placeholder(tf.int32, name="ind_len")
+        self.initial_state = tf.Variable(tf.zeros([hps.batch_size, hps.state_size + hps.projected_size]), trainable=False,
+                                collections=[tf.GraphKeys.LOCAL_VARIABLES], name="state_0_0")
+
+        emb_vars = sharded_variable("emb", [hps.vocab_size, hps.emb_size],
+                                    hps.num_shards)  # vocab_size is too big for this model
+        x = tf.nn.embedding_lookup(emb_vars, self.x)  # [batch_size, steps, emb_size]
+        if hps.keep_prob < 1.0:
+            x = tf.nn.dropout(x, hps.keep_prob)
+
+        # [batch_size,emb_size]*steps
+        #inputs = [tf.squeeze(v, [1]) for v in tf.split(x, hps.num_steps, 1)]
+        inputs = x
+        with tf.variable_scope("lstm_0"):
+            cell = LSTMCell(hps.state_size, hps.emb_size, num_proj=hps.projected_size)
+
+        state = self.initial_state
+        inputs, self.final_state = cell(inputs,state)  # inputs[t] is h{t}??  state is h(t) ?? result of inputs[t] is project ??
+        if hps.keep_prob < 1.0:
+            inputs = tf.nn.dropout(inputs, hps.keep_prob)
+        inputs = tf.reshape(tf.concat(inputs, 1), [-1, hps.projected_size])
+        # Initialization ignores the fact that softmax_w is transposed. That worked slightly better.
+        softmax_w = sharded_variable("softmax_w", [hps.vocab_size, hps.projected_size], hps.num_shards)
+        softmax_b = tf.get_variable("softmax_b", [hps.vocab_size])
+
+        full_softmax_w = tf.reshape(tf.concat(softmax_w, 1), [-1, hps.projected_size])
+        full_softmax_w = full_softmax_w[:hps.vocab_size, :]
+        # [batch_size*steps,vocab]
+        self.logits = tf.matmul(inputs, full_softmax_w, transpose_b=True) + softmax_b
+        self.logits = tf.squeeze(self.logits)
+        """
+        ind_logits = tf.reshape(self.logits, [hps.vocab_size, -1])
+        ind_logits = tf.gather(ind_logits, self.ind)
+        print  "ind_logits:", self.logits, ind_logits
+        ind_logits = tf.reshape(ind_logits, [-1, self.ind_len])
+        self.top_k = tf.minimum(self.ind_len, hps.arg_max)
+        # for complete
+        _, self.ind_index = tf.nn.top_k(ind_logits, self.top_k)
+        print  "ind_index:", self.ind_index
+        """
+        # for predict
+        _, self.index = tf.nn.top_k(self.logits, hps.arg_max)
+        # for ema
+        ema = tf.train.ExponentialMovingAverage(decay=0.999)
+        variables_to_average = find_trainable_variables("LSTM")
+        self.avg_dict = ema.variables_to_restore(variables_to_average)
+
+
+
+
+
+
 
 class LM(object):
     def __init__(self, hps,mode="train", ps_device="/gpu:0"):
@@ -12,7 +68,6 @@ class LM(object):
         data_size = hps.batch_size * hps.num_gpus
         self.x = tf.placeholder(tf.int32, [data_size, hps.num_steps])
         self.y = tf.placeholder(tf.int32, [data_size, hps.num_steps])
-        self.w = tf.placeholder(tf.int32, [data_size, hps.num_steps])
         losses = []
         tower_grads = []
         logitses = []
@@ -20,37 +75,44 @@ class LM(object):
         if mode == "predict_next":
             self.ind = tf.placeholder(tf.int32,name="ind")
             self.ind_len = tf.placeholder(tf.int32,name="ind_len")
+            
 
         xs = tf.split(self.x, hps.num_gpus, 0)
         ys = tf.split(self.y, hps.num_gpus, 0)
-        ws = tf.split(self.w, hps.num_gpus, 0)
         print ("ngpus:",hps.num_gpus)
         for i in range(hps.num_gpus):
             with tf.device(assign_to_gpu(i, ps_device)), tf.variable_scope(tf.get_variable_scope(),
                                                                            reuse=True if i > 0 else None):
                 if mode == "predict_next":
-                    loss, logits, index = self._forward(i, xs[i], ys[i], ws[i], mode=mode)
+                    loss, logits = self._forward(i, xs[i], ys[i],  mode=mode)
                     logitses += [logits]
-                    indexes += [index]
+                    #indexes += [index]
                     #self.logits = logits
                 else:
-                    loss = self._forward(i, xs[i], ys[i], ws[i])
+                    loss = self._forward(i, xs[i], ys[i])
                 #self.logits = logits
                 losses += [loss]
                 if mode == "train":
                     cur_grads = self._backward(loss, summaries=(i == hps.num_gpus - 1))
                     tower_grads += [cur_grads]
         if mode == "predict_next":   # ngpus = 1, nlayers = 1, nums_step =1
-            self.logits = logitses
-            self.index = indexes
-            ind_logits =  tf.reshape(logitses[0], [hps.vocab_size, -1])
+            self.logits =  tf.squeeze(logitses)
+            """
+            #add graph 
+            logits_cache = tf.get_variable("logits_cache", hps.vocab_size)
+            assign_cache = tf.assign(logits_cache,  self.logits)
+            logits_bos = tf.get_variable("logits_bos", hps.vocab_size)
+            assign_cache = tf.assign(logits_cache, self.logits)[0]
+            assign_bos = tf.assign(logits_cache, logits_bos)[0]
+            """
+            ind_logits =  tf.reshape(self.logits, [hps.vocab_size, -1])
             ind_logits =  tf.gather(ind_logits, self.ind)
             print  "ind_logits:", logitses, ind_logits
             ind_logits =  tf.reshape(ind_logits, [-1, self.ind_len])
             self.top_k = tf.minimum(self.ind_len, hps.arg_max) 
-            _, self.ind_index    =  tf.nn.top_k(ind_logits, self.top_k)
+            _, self.ind_index = tf.nn.top_k(ind_logits, self.top_k)
             print  "ind_index:",  self.ind_index
-
+            _, self.index = tf.nn.top_k(self.logits, hps.arg_max)
 
         self.loss = tf.add_n(losses) / len(losses)  # total loss 
         tf.summary.scalar("model/loss", self.loss)
@@ -74,9 +136,8 @@ class LM(object):
                 self.train_op = tf.group(*[self.train_op, ema.apply(variables_to_average)])
                 self.avg_dict = ema.variables_to_restore(variables_to_average)
 
-    def _forward(self, gpu, x, y, w, mode="train"):
+    def _forward(self, gpu, x, y, mode="train"):
         hps = self.hps
-        w = tf.to_float(w)
         self.initial_states = []
         #every layer has a initial_state :tf.zero([hps.batch_size, hps.state_size + hps.projected_size])
         for i in range(hps.num_layers):
@@ -125,15 +186,16 @@ class LM(object):
             # targets = tf.reshape(tf.transpose(self.y), [-1])
             # index = tf.argmax(logits,axis=1)
             
-            _, index = tf.nn.top_k(logits, hps.arg_max)
-            print "index:",index 
+            #_, index = tf.nn.top_k(logits, hps.arg_max)
+            #print "index:",index 
             
             targets = tf.reshape(y, [-1])
             loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=targets,logits=logits)
-            loss = tf.reduce_mean(loss * tf.reshape(w, [-1]))
+            #loss = tf.reduce_mean(loss * tf.reshape(w, [-1]))
+            loss = tf.reduce_mean(loss)
 
             if mode == "predict_next":
-                return loss, logits, index
+                return loss, logits
 
         else:
             targets = tf.reshape(y, [-1, 1])
@@ -141,7 +203,7 @@ class LM(object):
             loss = tf.nn.sampled_softmax_loss(softmax_w, softmax_b, targets, tf.to_float(inputs),
                                               hps.num_sampled, hps.vocab_size)
             
-        loss = tf.reduce_mean(loss * tf.reshape(w, [-1]))
+        loss = tf.reduce_mean(loss)
         return loss
 
     def _backward(self, loss, summaries=False):
@@ -199,7 +261,7 @@ class LM(object):
             projected_size=512,
             num_sampled=8192,
             num_gpus=1,
-            arg_max=10,
+            arg_max=5,
             average_params=True,
             run_profiler=False,
         )

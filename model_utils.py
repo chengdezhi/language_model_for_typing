@@ -96,6 +96,7 @@ class LSTMCell(tf.contrib.rnn.BasicRNNCell):
         m_prev = tf.slice(state, [0, self._num_units], [-1, num_proj])   # is h{j-1}
 
         input_size = inputs.get_shape().with_rank(2)[1]
+        print "input_size:",input_size
         if input_size.value is None:
             raise ValueError("Could not infer input size from inputs.get_shape()[-1]")
         with tf.variable_scope(type(self).__name__,

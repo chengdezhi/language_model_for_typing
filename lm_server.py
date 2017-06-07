@@ -7,7 +7,7 @@ import urllib2
 from thriftpy.rpc import make_server
 import tensorflow as tf
 from data_utils import Vocabulary, Dataset
-from language_model import LM
+from language_model import LM, inference_graph
 from common import CheckpointLoader
 import numpy as np
 
@@ -28,7 +28,7 @@ with tf.variable_scope("model"):
     hps.num_sampled = 0  # Always using full softmax at evaluation.   run out of memory 
     hps.keep_prob = 1.0       
     hps.num_gpus = 1 
-    model = LM(hps,"predict_next", "/cpu:0")                                            
+    model = inference_graph(hps)
 if hps.average_params:                                                                  
     print("Averaging parameters for evaluation.")                                       
     saver = tf.train.Saver(model.avg_dict)                                              
@@ -47,8 +47,87 @@ saver.restore(sess,"log.txt/train/model.ckpt-742996")
 trie = datrie.Trie.load("data/vocab_trie")
 init = tf.local_variables_initializer()
 sess.run(init)
-init_rnn_state = sess.run(model.initial_states)
-print "init_rnn_state:",init_rnn_state
+
+
+# additional graph
+logits_cache = tf.get_variable("logits_cache", hps.vocab_size)
+logits_bos = tf.get_variable("logits_bos", hps.vocab_size)
+tf_inds = tf.placeholder(tf.int32)
+tf_ind_len = tf.placeholder(tf.int32, name="ind_len")
+tf_top_k = tf.minimum(tf_ind_len, hps.arg_max)
+assign_cache = tf.assign(logits_cache, model.logits)
+assign_bos = tf.assign(logits_cache, logits_bos)
+_,partial_top_k = tf.nn.top_k(tf.gather(logits_cache, tf_inds), tf_top_k)
+
+import pylru
+size = 100
+cache = pylru.lrucache(size)
+
+# warm up 
+with sess.as_default():
+    x = vocab.s_id
+    #x = np.array(x)
+    x = np.reshape(x,[1])
+    print "x:",x
+    init_rnn_state = sess.run(model.initial_state)
+    init_rnn_state = sess.run(model.final_state, {model.x:x, model.initial_state:init_rnn_state})
+    print "init_rnn_state:", init_rnn_state
+
+def  word2id(word):
+    return vocab.get_id(word)
+
+def  predict(instr):
+    words = instr.split()
+    if " ".join(words[:-1]) in cache:
+        state = cache[" ".join(words[:-1])]
+        x_words = [words[-1]]
+    else:
+        state = init_rnn_state
+        x_words = words
+    print "x_words:",x_words
+    x_len = len(x_words)
+    for i,word in enumerate(x_words):
+        x = word2id(word)
+        x = np.reshape(x,[1])
+        if i!=x_len-1:
+            with sess.as_default():
+                state, _ = sess.run([model.final_state,assign_cache],{model.x:x,model.initial_state:state})
+        else:
+            with sess.as_default():
+                state, _, top_k_index =  sess.run([model.final_state,assign_cache,model.index], {model.x:x, model.initial_state:state})
+    cache[" ".join(words)] = state
+    preds = [vocab.get_token(ix) for ix in top_k_index]
+    return preds
+
+def  complete(instr):
+    words = instr.strip().split()
+    compl = words[-1]
+    compl_ind = [trie[cand_index] for cand_index in trie.keys(compl)]
+    compl_ind_len = np.array(len(compl_ind))
+    compl_ind = np.array(compl_ind)
+    words = words[:-1]
+
+    if " ".join(words) in cache:
+        state = cache[" ".join(words)]
+    else:
+        predict(" ".join(words))
+
+    with sess.as_default():
+        top_k_index = sess.run(partial_top_k,{tf_inds:compl_ind, tf_ind_len:compl_ind_len})
+    preds = [vocab.get_token(compl_ind[ix]) for ix in top_k_index]
+    return preds
+
+
+def  query_string(instr):
+    print "instr:", instr, type(instr)
+    if  type(instr) != unicode or instr.strip() == "":
+        return
+    print "instr:",instr
+    if instr[-1]==" ":
+        print "instr:", instr
+        return predict(instr)
+    else:
+        return complete(instr)
 
 class PredictHandler(object):
     def __init__(self):
@@ -56,8 +135,26 @@ class PredictHandler(object):
             self.log = {}
         except Exception as e:
             print e
-    
-    def getPrediction(self,sWord,sLocale,sAppName):
+
+    def getPrediction(self, sWord, sLocale, sAppName):
+        try:
+            start = time.time()
+            sWord = sWord.decode("utf-8")
+            words = query_string(sWord)
+            if not words:
+                words = []
+            result = interface_thrift.Result()
+            result.timeUsed = time.time() - start
+            print "result_time_used:",result.timeUsed
+            print "words:",words
+            result.sEngineTimeInfo = "1:0,3:0"
+            # result.listWords = self.ltmClient.get(sWord)
+            result.listWords = words
+            return result
+        except Exception as e:
+            print e
+
+    def getPrediction_old(self,sWord,sLocale,sAppName):
         #def getPrediction(self,sWord):
         #import pdb
         #pdb.set_trace()
@@ -79,12 +176,7 @@ class PredictHandler(object):
                 print "prefix:",prefix,type(prefix)
             print("input:",sWord,"pre:",prefix_input,"len:",len(prefix_input))
             input_len = len(prefix_input)
-            w = np.zeros([1, len(prefix_input)], np.uint8)
-            w[:] =1
             inputs_v = np.zeros([hps.batch_size*hps.num_gpus, hps.num_steps])
-            weights_v = np.zeros([hps.batch_size*hps.num_gpus, hps.num_steps])
-            weights = np.zeros([hps.batch_size*hps.num_gpus, input_len])
-            weights[0,:len(prefix_input)] = w[:]
             ''' 
             inputs = np.zeros([hps.batch_size*hps.num_gpus, input_len])
             weights = np.zeros([hps.batch_size*hps.num_gpus, input_len])
@@ -99,24 +191,29 @@ class PredictHandler(object):
                 #sess.run(tf.local_variables_initializer())
                 words = []
                 w_prob = []
-                sess.run(init)
+
                 
                 init_rnn_state = sess.run(model.initial_states)
                 step = 0
                 while step + st < input_len:
                     #inputs_v[0,:]  =  inputs[0,step:step+st]
-                    weights_v[0,:] =  weights[0,step:step+st] 
                     inputs_v[0,:] =   prefix_input[step:step+st]
                     #index = sess.run([model.index],{model.x:inputs_v, model.w:weights_v})
-                    init_rnn_state = sess.run(model.final_state,{model.x:inputs_v, model.w:weights_v, model.initial_states:init_rnn_state})
+                    init_rnn_state = sess.run(model.final_state,{model.x:inputs_v, model.initial_states:init_rnn_state})
                     step += st
                 #print type(state),state[-1][-1][-1][-1]
                 
                 inputs_v[0,:input_len-step] = prefix_input[step:input_len]
-                weights_v[0,:input_len-step] = weights[0,step:input_len]
                 if not isCompletion:
                     #TODO  optimizeir
-                    indexes = sess.run(model.index, {model.x:inputs_v, model.w:weights_v, model.initial_states:init_rnn_state})
+                    start = time.time()
+                    t_logits = sess.run(model.logits, {model.x:inputs_v, model.initial_states:init_rnn_state})
+                    end = time.time()
+                    print "logits_time:", end -start
+                    start = time.time()
+                    indexes = sess.run(model.index, {model.x:inputs_v, model.initial_states:init_rnn_state})
+                    end = time.time()
+                    print "index_time:", end - start
                     indexes = np.reshape(indexes,[hps.num_steps,hps.arg_max])
                     for j in range(hps.arg_max):
                         word = vocab.get_token(indexes[len(prefix_input)-1-step][j])
@@ -142,19 +239,17 @@ class PredictHandler(object):
                         words += [word]
                     """
                 else:   
+                    start = time.time() 
                     cand = [trie[cand_index] for cand_index in trie.keys(prefix)] 
                     ind_len = np.array(len(cand))
                     if ind_len <= 1:
                         words += [prefix]
                     else:
-                    
                         cand  = np.array(cand)
-                    
                         #print ind_len, "ind_len"
                         #topk = sess.run(model.top_k,{model.ind_len:ind_len})
                         #print topk ,"top_k"
-    
-                        index,topk = sess.run([model.ind_index,model.top_k],{model.x:inputs_v, model.w:weights_v,  model.initial_states:init_rnn_state, model.ind: cand, model.ind_len:ind_len})
+                        index, topk = sess.run([model.ind_index,model.top_k],{model.x:inputs_v,  model.initial_states:init_rnn_state, model.ind: cand, model.ind_len:ind_len})
                         index = np.reshape(index,[hps.num_steps, topk])
                         print "index:",index
                         words = []
